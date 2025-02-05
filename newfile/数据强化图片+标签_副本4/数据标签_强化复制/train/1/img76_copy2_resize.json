@@ -1,0 +1,90 @@
+{
+    "version": "5.5.0",
+    "flags": {},
+    "shapes": [
+        {
+            "label": "1st degree",
+            "points": [
+                [
+                    229.21422663358143,
+                    164.02694080113434
+                ],
+                [
+                    259.3879239040529,
+                    534.5811178069242
+                ],
+                [
+                    321.3234077750206,
+                    626.2743707904998
+                ],
+                [
+                    427.1960297766749,
+                    634.7819922013471
+                ],
+                [
+                    396.4929693961951,
+                    319.0547087321281
+                ],
+                [
+                    339.32175351530185,
+                    182.9327661585726
+                ],
+                [
+                    223.92059553349873,
+                    162.13635826539053
+                ]
+            ],
+            "group_id": null,
+            "description": "",
+            "shape_type": "polygon",
+            "flags": {},
+            "mask": null
+        },
+        {
+            "label": "1st degree",
+            "points": [
+                [
+                    150.86848635235728,
+                    8.999172870140645
+                ],
+                [
+                    151.92721257237383,
+                    99.74713458584428
+                ],
+                [
+                    209.09842845326713,
+                    160.2457757296467
+                ],
+                [
+                    149.2803970223325,
+                    251.93902871322229
+                ],
+                [
+                    68.81720430107526,
+                    270.8448540706606
+                ],
+                [
+                    1.0587262200165426,
+                    256.66548505258186
+                ],
+                [
+                    0.0,
+                    66.66194021032733
+                ],
+                [
+                    73.58147229114971,
+                    9.944464138012563
+                ]
+            ],
+            "group_id": null,
+            "description": "",
+            "shape_type": "polygon",
+            "flags": {},
+            "mask": null
+        }
+    ],
+    "imagePath": "../../../skin burn dataset/train/1st degree burn/img76.jpg",
+    "imageData": "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",
+    "imageHeight": 640,
+    "imageWidth": 640
+}
