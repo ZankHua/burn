@@ -157,16 +157,27 @@ def make_coco_transforms(image_set):
 
 
 def build(image_set, args):
-    root = Path(args.coco_path)
-    assert root.exists(), f'provided COCO path {root} does not exist'
-    mode = 'instances'
-    
+    root = Path("/Users/zhankanghua/Desktop/毕业论文/数据/数据强化图片+标签_副本/转换后的COCO")
+    assert root.exists(), f'Provided COCO path {root} does not exist'
+
     PATHS = {
-        "train": (root / "coco_format" / "train", root / "coco_format" / "train" / "annotations.json"),
-        "val": (root / "coco_format" / "valid", root / "coco_format" / "valid" / "annotations.json"),
+        "train": (
+            root / "coco_format" / "train" / "image",  # <-- 指向 train/images 文件夹
+            root / "coco_format" / "train" / "annotations.json"
+        ),
+        "val": (
+            root / "coco_format" / "valid" / "image",
+            root / "coco_format" / "valid" / "annotations.json"
+        ),
     }
 
     img_folder, ann_file = PATHS[image_set]
-    dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms(image_set), return_masks=args.masks,
-                            cache_mode=args.cache_mode, local_rank=get_local_rank(), local_size=get_local_size())
+    dataset = CocoDetection(
+        img_folder, ann_file,
+        transforms=make_coco_transforms(image_set),
+        return_masks=args.masks,
+        cache_mode=args.cache_mode,
+        local_rank=get_local_rank(),
+        local_size=get_local_size()
+    )
     return dataset
