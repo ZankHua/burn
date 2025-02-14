@@ -1,25 +1,24 @@
+# burnnet.py
+
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
-from torch import nn
 import math
 
 from util import box_ops
+
+# 假设你要在同目录下的 backbone.py / decoder.py 中导入函数
+# 如果你包结构是 models/backbone.py, models/decoder.py, 则可以：
 from .backbone import build_backbone
 from .decoder import build_decoder
 
 
 class BurnNet(nn.Module):
-    def __init__(self, backbone, decoder, num_classes, num_feature_levels, aux_loss=True, with_box_refine=False):
+    def __init__(self, backbone, decoder, num_classes=4,
+                 num_feature_levels=1, aux_loss=True, with_box_refine=False):
         """
-        Initializes the detection model.
-
-        Parameters:
-            backbone: 模块，用于特征提取。
-            decoder: 模块，用于将骨干输出转换为检测结果。
-            num_classes: 检测类别数（这里为 4：无烧伤, 烧伤等级1,2,3）。
-            num_feature_levels: 特征金字塔的层数。
-            aux_loss: 是否使用辅助损失（在每层 decoder 上计算损失）。
-            with_box_refine: 是否进行迭代的边界框细化（此示例中未具体实现）。
+        backbone: 输出 [B,256,H,W] 的骨干网络
+        decoder: 需要 [S,B,256] 的 transformer decoder
         """
         super().__init__()
         self.backbone = backbone
@@ -30,90 +29,124 @@ class BurnNet(nn.Module):
         self.num_classes = num_classes
 
     def forward(self, sample):
-        """
-        前向传播：
-          1. 通过 backbone 提取特征。
-          2. 将提取到的特征传入 decoder 得到检测结果。
+        # 如果 sample 是 NestedTensor => x=sample.tensors; 否则 x=sample
+        if hasattr(sample, "tensors"):
+            x = sample.tensors
+        else:
+            x = sample
 
-        参数:
-            sample: 输入图片的 tensor 或经过预处理后的 batch 数据。
+        # 1) 通过骨干 => [B,256,H,W]
+        feat = self.backbone(x)
 
-        返回:
-            decoder 输出的结果，通常是一个 dict，包含 'pred_logits' 和 'pred_masks' 等字段。
-        """
-        features = self.backbone(sample)
-        outputs = self.decoder(features)
+        # 2) flatten+permute => [H*W,B,256]
+        B, C, H, W = feat.shape
+        feat = feat.flatten(2)         # => [B,256,H*W]
+        feat = feat.permute(2,0,1)     # => [H*W,B,256]
+
+        # 3) decoder => dict { 'pred_logits','pred_masks',... }
+        outputs = self.decoder(feat)
         return outputs
 
 
 class SetCriterion(nn.Module):
     """
     计算损失的模块。
-    本示例实现了一个简单的分类交叉熵损失和分割 mask 的二值交叉熵损失。
-    实际项目中通常需要使用 Hungarian Matcher 进行目标与预测匹配，并可能使用 Dice Loss 或 Focal Loss 进行分割损失计算。
+    本示例实现了一个简单分类交叉熵 + 分割 mask 的BCELoss。
+    在 loss_labels 中，额外统计 4 个类别分别的错误率 + 总错误率。
     """
     def __init__(self, num_classes, weight_dict, losses, focal_alpha=0.25):
-        """
-        Parameters:
-            num_classes: 类别数（不包括 no-object 类）。
-            weight_dict: dict，指定各损失项的权重。
-            losses: list，包含要计算的损失名称（例如 ['labels', 'masks']）。
-            focal_alpha: Focal Loss 中的 alpha 参数（如使用）。
-        """
         super().__init__()
         self.num_classes = num_classes
         self.weight_dict = weight_dict
         self.losses = losses
         self.focal_alpha = focal_alpha
+        # 简单CE
         self.cls_loss = nn.CrossEntropyLoss()
-        self.mask_loss = nn.BCELoss()  # 二值交叉熵损失，用于分割 mask
+        # 简单二值交叉熵
+        self.mask_loss= nn.BCELoss()
+
+        # 如果想给每个类别命个好记的名字，也可以这样:
+        # self.id2name = {
+        #     0: 'not_burn',
+        #     1: '1st_degree',
+        #     2: '2nd_degree',
+        #     3: '3rd_degree'
+        # }
+        # 或者你也可以直接在loss里写死
 
     def loss_labels(self, outputs, targets, indices, num_boxes, log=True):
         """
-        计算分类损失（交叉熵）。
-        这里示例中简单取每个样本的第一个目标对应第一个预测计算损失，
-        实际中应采用 Hungarian Matcher 对所有预测与目标进行匹配。
+        计算分类损失（交叉熵） + 额外统计整体 class_error + 每个类别的 class_error。
         """
         losses = {}
-        # outputs['pred_logits'] 的 shape: (batch_size, num_queries, num_classes)
+        # shape=(B,num_queries,num_classes)
         pred_logits = outputs['pred_logits']
+        # 仅示例：把所有样本都当 label=0，或取 targets 的第一个 label 做演示
         target_labels = []
         for t in targets:
-            if len(t["labels"]) > 0:
+            if len(t["labels"])>0:
                 target_labels.append(t["labels"][0])
             else:
                 target_labels.append(torch.tensor(0, device=pred_logits.device))
-        target_labels = torch.stack(target_labels)
-        loss_ce = self.cls_loss(pred_logits[:, 0, :], target_labels)
-        losses['loss_ce'] = loss_ce * self.weight_dict.get('loss_ce', 1.0)
+        target_labels = torch.stack(target_labels)  # =>(B,)
+
+        # -- 1) 计算交叉熵
+        loss_ce = self.cls_loss(pred_logits[:,0,:], target_labels)
+        losses['loss_ce'] = loss_ce * self.weight_dict.get('loss_ce',1.0)
+
+        # -- 2) 计算整体的分类错误率 (class_error)
+        with torch.no_grad():
+            pred_class = pred_logits[:,0,:].argmax(dim=-1)  # (B,)
+            acc_all = (pred_class == target_labels).float().mean()  # 整体准确率
+            class_error_all = 100.0 * (1.0 - acc_all)               # 整体错误率(百分比)
+        losses['class_error'] = class_error_all
+
+        # -- 3) 计算每个类别的错误率
+        #     注意，如果 batch 中没有该类别的数据，就跳过
+        with torch.no_grad():
+            for class_id in range(self.num_classes):
+                # 取该类别的掩码
+                class_mask = (target_labels == class_id)
+                if class_mask.sum() == 0:
+                    # 如果这一批里没有该类别的样本，可选择跳过或赋值为0/None
+                    continue
+
+                # 对子集中计算准确率
+                pred_in_class = pred_class[class_mask]  # 该子集的预测
+                acc_c = (pred_in_class == class_id).float().mean()
+                class_err_c = 100.0 * (1.0 - acc_c)
+
+                # 例如在 losses 字典中加一个 key
+                # 格式可以自定义，如 "class_error_0" 或更详细
+                losses[f'class_error_{class_id}'] = class_err_c
+
+                # 如果你有一个 self.id2name 映射，也可以这样：
+                # name = self.id2name[class_id]
+                # losses[f'class_error_{name}'] = class_err_c
+
         return losses
 
+    # -------------- 其它部分保持不变 ------------------
     def loss_masks(self, outputs, targets, indices, num_boxes):
-        """
-        计算分割 mask 的损失（二值交叉熵）。
-        这里示例中简单取每个样本的第一个目标 mask 与第一个预测 mask 进行比较，
-        实际中需采用更合理的匹配策略。
-        """
-        losses = {}
-        # outputs['pred_masks'] 的 shape: (batch_size, num_queries, H, W)
-        pred_masks = outputs['pred_masks']
-        target_masks = []
+        losses={}
+        pred_masks = outputs['pred_masks']  # (B,num_queries,H,W)
+        pred_mask = pred_masks[:,0,:,:]  # =>(B,H,W)
+
+        target_masks=[]
         for t in targets:
-            if "masks" in t and len(t["masks"]) > 0:
-                # 使用第一个 mask 作为示例，确保为 float 类型
-                mask = t["masks"][0].float()
-                # 如果尺寸不匹配，进行插值调整
-                if mask.shape != pred_masks.shape[2:]:
-                    mask = F.interpolate(mask.unsqueeze(0).unsqueeze(0), size=pred_masks.shape[2:], mode='bilinear', align_corners=False)
-                    mask = mask.squeeze(0).squeeze(0)
+            if "masks" in t and len(t["masks"])>0:
+                mask = t["masks"][0].float().to(pred_mask.device)
+                if mask.shape != pred_mask.shape[1:]:
+                    mask = F.interpolate(mask.unsqueeze(0).unsqueeze(0),
+                                         size=pred_mask.shape[1:],
+                                         mode='bilinear', align_corners=False)[0,0]
                 target_masks.append(mask)
             else:
-                target_masks.append(torch.zeros(pred_masks.shape[2:], device=pred_masks.device))
-        target_masks = torch.stack(target_masks)  # shape: (batch_size, H, W)
-        # 取第一个预测 mask作为示例
-        pred_mask = pred_masks[:, 0, :, :]  # shape: (batch_size, H, W)
+                target_masks.append(torch.zeros_like(pred_mask[0]))
+        target_masks = torch.stack(target_masks)
+
         loss_mask = self.mask_loss(pred_mask, target_masks)
-        losses['loss_mask'] = loss_mask * self.weight_dict.get('loss_mask', 1.0)
+        losses['loss_mask'] = loss_mask * self.weight_dict.get('loss_mask',1.0)
         return losses
 
     def get_loss(self, loss, outputs, targets, num_boxes, **kwargs):
@@ -125,85 +158,56 @@ class SetCriterion(nn.Module):
 
     def forward(self, outputs, targets):
         num_boxes = sum(len(t["labels"]) for t in targets)
-        losses = {}
-        for loss in self.losses:
-            losses.update(self.get_loss(loss, outputs, targets, num_boxes))
+        losses={}
+        for l in self.losses:
+            losses.update(self.get_loss(l, outputs, targets, num_boxes))
         return losses
 
 
 class PostProcess(nn.Module):
     """
-    将模型输出转换为 COCO API 预期的格式。
-    如果输出中包含 'pred_masks'，也将其返回（原始 tensor，需要进一步处理用于评估）。
+    将模型输出转换为 COCO API 预期的格式(可做mask上采样等)。
     """
     @torch.no_grad()
     def forward(self, outputs, target_sizes):
-        # 如果模型同时输出 bbox 和 mask，则进行相应处理（本示例主要关注 mask 部分）
-        results = {}
-        # 如果输出中包含边界框信息（备用）
-        if 'pred_boxes' in outputs:
-            out_logits = outputs['pred_logits']
-            out_bbox = outputs['pred_boxes']
-            assert len(out_logits) == len(target_sizes)
-            assert target_sizes.shape[1] == 2
-            prob = out_logits.sigmoid()
-            topk_values, topk_indexes = torch.topk(prob.view(out_logits.shape[0], -1), 100, dim=1)
-            scores = topk_values
-            topk_boxes = topk_indexes // out_logits.shape[2]
-            labels = topk_indexes % out_logits.shape[2]
-            boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
-            boxes = torch.gather(boxes, 1, topk_boxes.unsqueeze(-1).repeat(1, 1, 4))
-            img_h, img_w = target_sizes.unbind(1)
-            scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1)
-            boxes = boxes * scale_fct[:, None, :]
-            results['bbox'] = [{'scores': s, 'labels': l, 'boxes': b} for s, l, b in zip(scores, labels, boxes)]
-        # 对于 mask，直接返回预测结果（注意：通常需要上采样到原图尺寸）
-        if 'pred_masks' in outputs:
-            results['masks'] = outputs['pred_masks']
-        return results
+        # 仅简单返回
+        return outputs
 
 
+###################################
+# 一个build函数,把以上组件组合
+###################################
 def build(args):
     """
-    构建整个检测模型，包括骨干网络、解码器、损失函数和后处理模块。
-    针对烧伤检测任务，主要实现烧伤等级检测（分类）和烧伤位置分割（mask 分割）。
+    将 backbone、decoder、BurnNet、SetCriterion、PostProcess 组装。
     """
-    # 烧伤检测任务只有 4 个类别：无烧伤、烧伤等级1、烧伤等级2、烧伤等级3
-    num_classes = 4
-    device = torch.device(args.device)
+    # 1) 构建backbone => [B,256,H,W]
+    backbone = build_backbone(args) 
 
-    backbone = build_backbone(args)
-    # 对于某些骨干（如 swin_t、swin_s、vit_b），需要添加卷积层统一特征通道数
-    if args.backbone in ['swin_t', 'swin_s', 'vit_b']:
-        backbone = nn.Sequential(
-            backbone,
-            nn.Conv2d(768 if args.backbone == 'vit_b' else 1024, 256, kernel_size=1)
-        )
-    decoder = build_decoder(args)
+    # 2) 构建decoder => Transformer
+    dec = build_decoder(args)
+
+    # 3) 组装 BurnNet
     model = BurnNet(
-        backbone,
-        decoder,
-        num_classes=num_classes,
+        backbone=backbone,
+        decoder=dec,
+        num_classes=4,
         num_feature_levels=args.num_feature_levels,
         aux_loss=args.aux_loss,
-        with_box_refine=args.with_box_refine,
+        with_box_refine=args.with_box_refine
     )
-    # 构造损失权重字典，针对烧伤检测任务只计算分类损失和分割 mask 损失
-    weight_dict = {
-        'loss_ce': args.cls_loss_coef if hasattr(args, "cls_loss_coef") else 1.0,
-        'loss_mask': args.mask_loss_coef if hasattr(args, "mask_loss_coef") else 1.0
-    }
-    if args.aux_loss:
-        aux_weight_dict = {}
-        for i in range(args.dec_layers - 1):
-            aux_weight_dict.update({k + f'_{i}': v for k, v in weight_dict.items()})
-        aux_weight_dict.update({k + f'_enc': v for k, v in weight_dict.items()})
-        weight_dict.update(aux_weight_dict)
+    model.to(args.device)
 
-    # 设置损失类型为 'labels' 和 'masks'
-    losses = ['labels', 'masks']
-    criterion = SetCriterion(num_classes, weight_dict, losses, focal_alpha=args.focal_alpha if hasattr(args, "focal_alpha") else 0.25)
-    criterion.to(device)
-    # 后处理模块，返回预测结果格式（包含 bbox 及 mask，如果有）
-    postprocessors = {'bbox': PostProcess()}
+    # 4) 组装损失
+    weight_dict = {
+        'loss_ce': getattr(args,'cls_loss_coef',1.0),
+        'loss_mask':getattr(args,'mask_loss_coef',1.0)
+    }
+    losses = ['labels','masks']
+    criterion = SetCriterion(4, weight_dict, losses)
+    criterion.to(args.device)
+
+    # 5) 后处理
+    postprocessors = {"bbox": PostProcess()}
+
     return model, criterion, postprocessors

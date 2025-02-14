@@ -157,16 +157,16 @@ def make_coco_transforms(image_set):
 
 
 def build(image_set, args):
-    root = Path("/Users/zhankanghua/Desktop/毕业论文/数据/数据强化图片+标签_副本/转换后的COCO")
+    root = Path("/Users/zhankanghua/Desktop/毕业论文/数据/新label_me/转换后的COCO")
     assert root.exists(), f'Provided COCO path {root} does not exist'
 
     PATHS = {
         "train": (
-            root / "coco_format" / "train" / "image",  # <-- 指向 train/images 文件夹
+            root / "coco_format" / "train" / "train",  # <-- 指向 train/images 文件夹
             root / "coco_format" / "train" / "annotations.json"
         ),
         "val": (
-            root / "coco_format" / "valid" / "image",
+            root / "coco_format" / "valid" / "valid",
             root / "coco_format" / "valid" / "annotations.json"
         ),
     }

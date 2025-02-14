@@ -12,18 +12,22 @@ import util.misc as utils
 from datasets import get_coco_api_from_dataset
 from engine import evaluate, train_one_epoch
 from models import build_model
-
-# 使用 COCO 数据集加载器，此处调用 datasets/coco.py 中的 build 函数
+# 使用 COCO 数据集加载器，从 datasets/coco.py 中导入 build 函数并重命名为 build_dataset
 from datasets.coco import build as build_dataset
 
 
+import argparse
+
+import argparse
+
+import argparse
 
 def get_args_parser():
     parser = argparse.ArgumentParser('Burning Detector', add_help=False)
 
     # Training parameters
     parser.add_argument('--lr', default=2e-4, type=float, help="Main learning rate for training.")
-    parser.add_argument('--batch_size', default=3, type=int, help="Batch size for training.")
+    parser.add_argument('--batch_size', default=2, type=int, help="Batch size for training.")
     parser.add_argument('--epochs', default=50, type=int, help="Number of training epochs.")
     parser.add_argument('--lr_drop', default=40, type=int, help="Epoch when learning rate drops.")
     parser.add_argument('--clip_max_norm', default=0.1, type=float, help="Maximum norm for gradient clipping.")
@@ -72,7 +76,7 @@ def get_args_parser():
     parser.add_argument('--coco_path', default='./data/coco', type=str, help="Path to the COCO dataset.")
 
     # Device settings
-    parser.add_argument('--device', default='cuda', help="Device for training (cuda or cpu).")
+    parser.add_argument('--device', default='mps', help="Device for training (cuda, mps or cpu).")
     parser.add_argument('--seed', default=42, type=int, help="Random seed for reproducibility.")
     parser.add_argument('--resume', default='', help="Path to checkpoint for resuming training.")
     parser.add_argument('--output_dir', default='./output', help="Path to save the trained model and logs.")
@@ -100,24 +104,39 @@ def get_args_parser():
     parser.add_argument('--local_rank', default=0, type=int, help="Local rank for distributed training.")
     parser.add_argument('--local_size', default=1, type=int, help="Local size for distributed training.")
 
+    # New: Loss weights and focal_alpha parameters (for burn detection task)
+    parser.add_argument('--cls_loss_coef', default=1.0, type=float, help="Weight for classification loss.")
+    parser.add_argument('--mask_loss_coef', default=1.0, type=float, help="Weight for mask loss.")
+    parser.add_argument('--focal_alpha', default=0.25, type=float, help="Focal loss alpha parameter.")
+
+    # New: Auxiliary loss switch (default enabled)
+    parser.add_argument('--aux_loss', dest='aux_loss', action='store_true', help="Enable auxiliary loss (default: True)")
+    parser.add_argument('--no-aux_loss', dest='aux_loss', action='store_false', help="Disable auxiliary loss")
+    parser.set_defaults(aux_loss=True)
+
+    # New: Iterative box refinement switch (default disabled)
+    parser.add_argument('--with_box_refine', action='store_true',
+                        help="Enable iterative box refinement in the model (default: False)")
+
     return parser
+
 
 
 def main(args):
     device = torch.device(args.device)
-    # Set random seeds for reproducibility
+    # 设置随机种子，确保结果可复现
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     random.seed(args.seed)
 
-    # Build model, loss criterion, and postprocessors
+    # 构建模型、损失函数和后处理模块
     model, criterion, postprocessors = build_model(args)
     model.to(device)
-    model_without_ddp = model  # 若使用 DistributedDataParallel，请在此处包装模型
+    model_without_ddp = model  # 如果使用分布式训练，请在此处包装成 DDP 模型
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print("Number of parameters:", n_parameters)
 
-    # Build COCO datasets
+    # 构建 COCO 数据集（真实数据加载）
     dataset_train = build_dataset(image_set='train', args=args)
     dataset_val = build_dataset(image_set='val', args=args)
 
@@ -132,14 +151,14 @@ def main(args):
                                  drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers,
                                  pin_memory=True)
 
-    # Print parameter names for debugging
+    # 调试用：打印所有参数名称
     def match_name_keywords(n, name_keywords):
         return any(keyword in n for keyword in name_keywords)
 
     for n, p in model_without_ddp.named_parameters():
         print(n)
 
-    # Setup optimizer with different learning rates for different parameter groups
+    # 根据不同参数组设置不同学习率
     param_dicts = [
         {
             "params": [p for n, p in model_without_ddp.named_parameters()
@@ -160,6 +179,7 @@ def main(args):
         }
     ]
 
+    # 选择优化器
     if args.sgd:
         optimizer = torch.optim.SGD(param_dicts, lr=args.lr, momentum=0.9,
                                     weight_decay=args.weight_decay)
@@ -173,7 +193,7 @@ def main(args):
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Resume training if checkpoint is provided
+    # 如果指定了 checkpoint，则恢复训练
     if args.resume:
         if args.resume.startswith('https'):
             checkpoint = torch.hub.load_state_dict_from_url(args.resume, map_location='cpu', check_hash=True)
@@ -205,6 +225,7 @@ def main(args):
             test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
                                                   data_loader_val, base_ds, device, args.output_dir)
 
+    # 如果指定为评估模式，则仅执行评估
     if args.eval:
         test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
                                               data_loader_val, base_ds, device, args.output_dir)
@@ -212,6 +233,7 @@ def main(args):
             utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
         return
 
+    # 开始训练循环
     print("Start training")
     start_time = time.time()
     for epoch in range(args.start_epoch, args.epochs):

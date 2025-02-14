@@ -18,6 +18,7 @@ import torchvision
 from jinja2.utils import Joiner
 from timm import create_model
 from torch import nn
+from torchvision.models import ResNet101_Weights, ResNet50_Weights
 from torchvision.models._utils import IntermediateLayerGetter
 from typing import Dict, List
 from models import swin_transformer
@@ -195,16 +196,48 @@ class Joiner(nn.Sequential):
 
 def build_backbone(args):
     """
-    Builds the backbone model (ResNet, Swin Transformer, or Vision Transformer).
+    Builds the backbone model (ResNet, Swin Transformer, or ViT)
+    and ensures final output channels = 256 if needed.
     """
+    # 1) 构建 base backbone
     if args.backbone in ['resnet50', 'resnet101']:
-        backbone = models.__dict__[args.backbone](pretrained=True)
-        backbone = nn.Sequential(*list(backbone.children())[:-2])  # Remove classification head
+        if args.backbone == 'resnet50':
+            backbone = models.resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
+        else:  # 'resnet101'
+            backbone = models.resnet101(weights=ResNet101_Weights.IMAGENET1K_V1)
+        # 去除 FC
+        backbone = nn.Sequential(*list(backbone.children())[:-2])  # => [B, 2048, H, W]
+
+        # 在末尾加1x1 conv => [B,256,H,W]
+        backbone = nn.Sequential(
+            backbone,
+            nn.Conv2d(2048, 256, kernel_size=1)
+        )
+
     elif args.backbone in ['swin_t', 'swin_s']:
-        backbone = create_model(f"swin_{args.backbone[-1]}_patch4_window7_224", pretrained=True, num_classes=0)
+        # 例如 'swin_t' => 'swin_tiny_patch4_window7_224'
+        model_name = "swin_tiny_patch4_window7_224" if args.backbone == 'swin_t' else "swin_small_patch4_window7_224"
+        backbone = create_model(model_name, pretrained=True, num_classes=0)
+        # backbone输出可能是 768 通道 (tiny) 或 768/1024 等
+        # 需在外部加1x1 conv => [B,256,H,W]
+        # 先检查 backbone 的输出通道 backbone.num_features
+        out_dim = backbone.num_features  # e.g. 768
+        # 用 sequential 包裹
+        backbone = nn.Sequential(
+            backbone,
+            nn.Conv2d(out_dim, 256, kernel_size=1)
+        )
+
     elif args.backbone == 'vit_b':
+        # ViT-B/16 => 最终通道768
         backbone = create_model("vit_base_patch16_224", pretrained=True, num_classes=0)
+        # 这里同理 => [B,768,H/16,W/16], 需要1x1 conv
+        out_dim = backbone.num_features  # 768
+        backbone = nn.Sequential(
+            backbone,
+            nn.Conv2d(out_dim, 256, kernel_size=1)
+        )
     else:
-        raise ValueError(f" Unknown backbone: {args.backbone}")
+        raise ValueError(f"Unknown backbone: {args.backbone}")
 
     return backbone
