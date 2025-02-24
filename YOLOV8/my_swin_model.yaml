@@ -1,29 +1,29 @@
-# my_swin_model.yaml
+task: detect
+
+nc: 4  # number of classes
+
 backbone:
-  _target_: my_swin.SwinTransformer
-  patch_size: 4
-  in_chans: 3
-  embed_dim: 96
-  depths: [2, 2, 6, 2]
-  num_heads: [3, 6, 12, 24]
-  window_size: 7
-  mlp_ratio: 4.0
-  qkv_bias: true
-  qk_scale: null
-  drop_rate: 0.0
-  attn_drop_rate: 0.0
-  drop_path_rate: 0.1
-  ape: false
-  patch_norm: true
-  out_indices: [1, 2, 3]  # 只要三个特征图(1/8,1/16,1/32)
-  frozen_stages: -1
-  use_checkpoint: false
-
-
-neck:
-  _target_: ultralytics.nn.modules.YOLOV8Neck
+  # [from, repeats, module, args]
+  - [-1, 1, SwinTransformer, {
+        patch_size: 4,
+        in_chans: 3,
+        embed_dim: 96,
+        depths: [2, 2, 6, 2],
+        num_heads: [3, 6, 12, 24],
+        window_size: 7,
+        mlp_ratio: 4.0,
+        qkv_bias: true,
+        qk_scale: null,
+        drop_rate: 0.0,
+        attn_drop_rate: 0.0,
+        drop_path_rate: 0.1,
+        ape: false,
+        patch_norm: true,
+        out_indices: [1, 2, 3],
+        frozen_stages: -1,
+        use_checkpoint: false
+      }]
 
 head:
-  _target_: ultralytics.nn.modules.Detect
-
-nc: 4  # your class number
+  # [from, repeats, module, args]
+  - [-1, 1, Detect, [nc]]
