@@ -1,0 +1,8 @@
+train: /Users/zhankanghua/Desktop/毕业论文/数据/COCO to YOLO/dataset/coco/images/train2017
+val:   /Users/zhankanghua/Desktop/毕业论文/数据/COCO to YOLO/dataset/coco/images/val2017
+
+names:
+  0: not_burn
+  1: 1st_degree
+  2: 2nd_degree
+  3: 3rd_degree
